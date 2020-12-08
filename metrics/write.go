@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/tls"
 	"fmt"
 	"io"
 	"log"
@@ -36,6 +37,7 @@ type ConfigWrite struct {
 	UpdateNotify chan struct{}
 	PprofURLs    []*url.URL
 	Tenant       string
+	APIToken     string
 }
 
 // Client for the remote write requests.
@@ -48,9 +50,17 @@ type Client struct {
 // SendRemoteWrite initializes a http client and
 // sends metrics to a prometheus compatible remote endpoint.
 func SendRemoteWrite(config ConfigWrite) error {
-	var rt http.RoundTripper = &http.Transport{}
-	rt = &cortexTenantRoundTripper{tenant: config.Tenant, rt: rt}
-	httpClient := &http.Client{Transport: rt}
+	var httpClient *http.Client
+	if config.APIToken == "" {
+		var rt http.RoundTripper = &http.Transport{}
+		rt = &cortexTenantRoundTripper{tenant: config.Tenant, rt: rt}
+		httpClient = &http.Client{Transport: rt}
+	} else {
+		tlsConf := &tls.Config{InsecureSkipVerify: true}
+		var rt http.RoundTripper = &http.Transport{TLSClientConfig: tlsConf}
+		rt = &beaconTokenRoundTripper{apiToken: config.APIToken, rt: rt}
+		httpClient = &http.Client{Transport: rt}
+	}
 
 	c := Client{
 		client:  httpClient,
@@ -70,6 +80,18 @@ func (rt *cortexTenantRoundTripper) RoundTrip(req *http.Request) (*http.Response
 type cortexTenantRoundTripper struct {
 	tenant string
 	rt     http.RoundTripper
+}
+
+// Add the tenant ID header required by Cortex
+func (rt *beaconTokenRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+	req = cloneRequest(req)
+	req.Header.Set("Authorization", "bearer "+rt.apiToken)
+	return rt.rt.RoundTrip(req)
+}
+
+type beaconTokenRoundTripper struct {
+	apiToken string
+	rt       http.RoundTripper
 }
 
 // cloneRequest returns a clone of the provided *http.Request.
