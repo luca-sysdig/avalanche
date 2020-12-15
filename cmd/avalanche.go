@@ -26,11 +26,12 @@ var (
 	remoteURL           = kingpin.Flag("remote-url", "URL to send samples via remote_write API.").URL()
 	remotePprofURLs     = kingpin.Flag("remote-pprof-urls", "a list of urls to download pprofs during the remote write: --remote-pprof-urls=http://127.0.0.1:10902/debug/pprof/heap --remote-pprof-urls=http://127.0.0.1:10902/debug/pprof/profile").URLList()
 	remotePprofInterval = kingpin.Flag("remote-pprof-interval", "how often to download pprof profiles.When not provided it will download a profile once before the end of the test.").Duration()
+	remoteWritersCount  = kingpin.Flag("remote-writers-count", "how many concurrent writers to send remote_write API request.").Default("1").Int()
 	remoteBatchSize     = kingpin.Flag("remote-batch-size", "how many samples to send with each remote_write API request.").Default("2000").Int()
 	remoteRequestCount  = kingpin.Flag("remote-requests-count", "how many requests to send in total to the remote_write API.").Default("100").Int()
 	remoteReqsInterval  = kingpin.Flag("remote-write-interval", "delay between each remote write request.").Default("100ms").Duration()
 	remoteTenant        = kingpin.Flag("remote-tenant", "Tenant ID to include in remote_write send").Default("0").String()
-	remoteAPIToken      = kingpin.Flag("remote-api-token", "API token to include in remote_write send").Default("").String()
+	remoteAccessToken   = kingpin.Flag("remote-api-token", "API token to include in remote_write send").Default("").String()
 )
 
 func main() {
@@ -57,11 +58,12 @@ func main() {
 		config := metrics.ConfigWrite{
 			URL:             **remoteURL,
 			RequestInterval: *remoteReqsInterval,
+			WritersCount:    *remoteWritersCount,
 			BatchSize:       *remoteBatchSize,
 			RequestCount:    *remoteRequestCount,
 			UpdateNotify:    updateNotify,
 			Tenant:          *remoteTenant,
-			APIToken:        *remoteAPIToken,
+			AccessToken:     *remoteAccessToken,
 		}
 
 		// Collect Pprof during the write only if not collecting within a regular interval.

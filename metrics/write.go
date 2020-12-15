@@ -32,42 +32,70 @@ var userAgent = "avalanche"
 type ConfigWrite struct {
 	URL             url.URL
 	RequestInterval time.Duration
+	WritersCount,
 	BatchSize,
 	RequestCount int
 	UpdateNotify chan struct{}
 	PprofURLs    []*url.URL
 	Tenant       string
-	APIToken     string
+	AccessToken  string
 }
 
 // Client for the remote write requests.
 type Client struct {
-	client  *http.Client
+	clients []http.Client
 	timeout time.Duration
 	config  ConfigWrite
+}
+
+// SetupHTTPClients initializes HttpClients (one per writer)
+func SetupHTTPClients(config ConfigWrite) ([]http.Client, error) {
+	clients := []http.Client{}
+	for w := 0; w < config.WritersCount; w++ {
+		var httpClient *http.Client
+		if config.AccessToken != "" {
+			tlsConf := &tls.Config{InsecureSkipVerify: true}
+			var rt http.RoundTripper = &http.Transport{TLSClientConfig: tlsConf}
+			rt = &sysdigRoundTripper{apiToken: config.AccessToken, rt: rt}
+			httpClient = &http.Client{Transport: rt}
+		} else {
+			var rt http.RoundTripper = &http.Transport{}
+			rt = &cortexTenantRoundTripper{tenant: config.Tenant, rt: rt}
+			httpClient = &http.Client{Transport: rt}
+		}
+		clients = append(clients, *httpClient)
+	}
+	return clients, nil
 }
 
 // SendRemoteWrite initializes a http client and
 // sends metrics to a prometheus compatible remote endpoint.
 func SendRemoteWrite(config ConfigWrite) error {
-	var httpClient *http.Client
-	if config.APIToken == "" {
-		var rt http.RoundTripper = &http.Transport{}
-		rt = &cortexTenantRoundTripper{tenant: config.Tenant, rt: rt}
-		httpClient = &http.Client{Transport: rt}
-	} else {
-		tlsConf := &tls.Config{InsecureSkipVerify: true}
-		var rt http.RoundTripper = &http.Transport{TLSClientConfig: tlsConf}
-		rt = &beaconTokenRoundTripper{apiToken: config.APIToken, rt: rt}
-		httpClient = &http.Client{Transport: rt}
+	clients, error := SetupHTTPClients(config)
+	if error != nil {
+		return error
 	}
 
 	c := Client{
-		client:  httpClient,
+		clients: clients,
 		timeout: time.Minute,
 		config:  config,
 	}
-	return c.write()
+	if config.WritersCount == 1 {
+		return c.write(0)
+	}
+
+	var wg sync.WaitGroup
+	wg.Add(config.WritersCount)
+	for w := 0; w < config.WritersCount; w++ {
+		lw := w
+		go func() {
+			c.write(lw)
+			wg.Done()
+		}()
+	}
+	wg.Wait()
+	return nil
 }
 
 // Add the tenant ID header required by Cortex
@@ -83,13 +111,13 @@ type cortexTenantRoundTripper struct {
 }
 
 // Add the tenant ID header required by Cortex
-func (rt *beaconTokenRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+func (rt *sysdigRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
 	req = cloneRequest(req)
 	req.Header.Set("Authorization", "bearer "+rt.apiToken)
 	return rt.rt.RoundTrip(req)
 }
 
-type beaconTokenRoundTripper struct {
+type sysdigRoundTripper struct {
 	apiToken string
 	rt       http.RoundTripper
 }
@@ -108,9 +136,9 @@ func cloneRequest(r *http.Request) *http.Request {
 	return r2
 }
 
-func (c *Client) write() error {
+func (c *Client) write(writer int) error {
 
-	tss, err := collectMetrics()
+	tss, err := collectMetrics(writer)
 	if err != nil {
 		return err
 	}
@@ -142,7 +170,7 @@ func (c *Client) write() error {
 		select {
 		case <-c.config.UpdateNotify:
 			log.Println("updating remote write metrics")
-			tss, err = collectMetrics()
+			tss, err = collectMetrics(writer)
 			if err != nil {
 				merr.Add(err)
 			}
@@ -162,7 +190,7 @@ func (c *Client) write() error {
 				req := &prompb.WriteRequest{
 					Timeseries: tss[i:end],
 				}
-				err := c.Store(context.TODO(), req)
+				err := c.Store(context.TODO(), writer, req)
 				if err != nil {
 					merr.Add(err)
 					return
@@ -196,24 +224,24 @@ func updateTimetamps(tss []prompb.TimeSeries) []prompb.TimeSeries {
 	return tss
 }
 
-func collectMetrics() ([]prompb.TimeSeries, error) {
+func collectMetrics(writer int) ([]prompb.TimeSeries, error) {
 	metricsMux.Lock()
 	defer metricsMux.Unlock()
 	metricFamilies, err := promRegistry.Gather()
 	if err != nil {
 		return nil, err
 	}
-	return ToTimeSeriesSlice(metricFamilies), nil
+	return ToTimeSeriesSlice(metricFamilies, writer), nil
 }
 
 // ToTimeSeriesSlice converts a slice of metricFamilies containing samples into a slice of TimeSeries
-func ToTimeSeriesSlice(metricFamilies []*dto.MetricFamily) []prompb.TimeSeries {
+func ToTimeSeriesSlice(metricFamilies []*dto.MetricFamily, writer int) []prompb.TimeSeries {
 	tss := make([]prompb.TimeSeries, 0, len(metricFamilies)*10)
 	timestamp := int64(model.Now()) // Not using metric.TimestampMs because it is (always?) nil. Is this right?
 
 	for _, metricFamily := range metricFamilies {
 		for _, metric := range metricFamily.Metric {
-			labels := prompbLabels(*metricFamily.Name, metric.Label)
+			labels := prompbLabels(*metricFamily.Name, metric.Label, writer)
 			ts := prompb.TimeSeries{
 				Labels: labels,
 			}
@@ -236,11 +264,23 @@ func ToTimeSeriesSlice(metricFamilies []*dto.MetricFamily) []prompb.TimeSeries {
 	return tss
 }
 
-func prompbLabels(name string, label []*dto.LabelPair) []prompb.Label {
+func prompbLabels(name string, label []*dto.LabelPair, writer int) []prompb.Label {
 	ret := make([]prompb.Label, 0, len(label)+1)
 	ret = append(ret, prompb.Label{
 		Name:  model.MetricNameLabel,
 		Value: name,
+	})
+	ret = append(ret, prompb.Label{
+		Name:  "writer_index",
+		Value: fmt.Sprintf("writer_index_%03d", writer),
+	})
+	ret = append(ret, prompb.Label{
+		Name:  "writer_address",
+		Value: fmt.Sprintf("writer_address_%03d", writer),
+	})
+	ret = append(ret, prompb.Label{
+		Name:  "writer_geo",
+		Value: fmt.Sprintf("writer_geo_%03d", writer),
 	})
 	for _, pair := range label {
 		ret = append(ret, prompb.Label{
@@ -255,7 +295,7 @@ func prompbLabels(name string, label []*dto.LabelPair) []prompb.Label {
 }
 
 // Store sends a batch of samples to the HTTP endpoint.
-func (c *Client) Store(ctx context.Context, req *prompb.WriteRequest) error {
+func (c *Client) Store(ctx context.Context, writer int, req *prompb.WriteRequest) error {
 	data, err := proto.Marshal(req)
 	if err != nil {
 		return err
@@ -277,7 +317,7 @@ func (c *Client) Store(ctx context.Context, req *prompb.WriteRequest) error {
 	ctx, cancel := context.WithTimeout(context.Background(), c.timeout)
 	defer cancel()
 
-	httpResp, err := c.client.Do(httpReq.WithContext(ctx))
+	httpResp, err := c.clients[writer].Do(httpReq.WithContext(ctx))
 	if err != nil {
 		return err
 	}
