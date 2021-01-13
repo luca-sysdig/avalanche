@@ -26,6 +26,7 @@ var (
 	remoteURL           = kingpin.Flag("remote-url", "URL to send samples via remote_write API.").URL()
 	remotePprofURLs     = kingpin.Flag("remote-pprof-urls", "a list of urls to download pprofs during the remote write: --remote-pprof-urls=http://127.0.0.1:10902/debug/pprof/heap --remote-pprof-urls=http://127.0.0.1:10902/debug/pprof/profile").URLList()
 	remotePprofInterval = kingpin.Flag("remote-pprof-interval", "how often to download pprof profiles.When not provided it will download a profile once before the end of the test.").Duration()
+	remoteWritersSlice  = kingpin.Flag("remote-writers-slice", "how many concurrent writers to send remote_write API request.").Default("0").Int()
 	remoteWritersCount  = kingpin.Flag("remote-writers-count", "how many concurrent writers to send remote_write API request.").Default("1").Int()
 	remoteBatchSize     = kingpin.Flag("remote-batch-size", "how many samples to send with each remote_write API request.").Default("2000").Int()
 	remoteRequestCount  = kingpin.Flag("remote-requests-count", "how many requests to send in total to the remote_write API.").Default("100").Int()
@@ -42,7 +43,7 @@ func main() {
 
 	stop := make(chan struct{})
 	defer close(stop)
-	updateNotify, err := metrics.RunMetrics(*metricCount, *labelCount, *seriesCount, *metricLength, *labelLength, *valueInterval, *labelInterval, *metricInterval, stop)
+	updateNotify, err := metrics.RunMetrics(*remoteWritersCount, *metricCount, *labelCount, *seriesCount, *metricLength, *labelLength, *valueInterval, *labelInterval, *metricInterval, stop)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -58,6 +59,7 @@ func main() {
 		config := metrics.ConfigWrite{
 			URL:             **remoteURL,
 			RequestInterval: *remoteReqsInterval,
+			WritersBase:     (*remoteWritersSlice * *remoteWritersCount),
 			WritersCount:    *remoteWritersCount,
 			BatchSize:       *remoteBatchSize,
 			RequestCount:    *remoteRequestCount,

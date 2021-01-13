@@ -69,7 +69,7 @@ func cycleValues(labelKeys []string, labelValues []string, seriesCount int, seri
 }
 
 // RunMetrics creates a set of Prometheus test series that update over time
-func RunMetrics(metricCount int, labelCount int, seriesCount int, metricLength int, labelLength int, valueInterval int, seriesInterval int, metricInterval int, stop chan struct{}) (chan struct{}, error) {
+func RunMetrics(writersCount int, metricCount int, labelCount int, seriesCount int, metricLength int, labelLength int, valueInterval int, seriesInterval int, metricInterval int, stop chan struct{}) ([]chan struct{}, error) {
 	labelKeys := make([]string, labelCount, labelCount)
 	for idx := 0; idx < labelCount; idx++ {
 		labelKeys[idx] = fmt.Sprintf("label_key_%s_%v", strings.Repeat("k", labelLength), idx)
@@ -86,7 +86,11 @@ func RunMetrics(metricCount int, labelCount int, seriesCount int, metricLength i
 	valueTick := time.NewTicker(time.Duration(valueInterval) * time.Second)
 	seriesTick := time.NewTicker(time.Duration(seriesInterval) * time.Second)
 	metricTick := time.NewTicker(time.Duration(metricInterval) * time.Second)
-	updateNotify := make(chan struct{}, 1)
+	// One update channel per writer
+	updateNotify := make([]chan struct{}, writersCount)
+	for w := 0; w < writersCount; w++ {
+		updateNotify[w] = make(chan struct{}, 1)
+	}
 
 	go func() {
 		for tick := range valueTick.C {
@@ -94,10 +98,7 @@ func RunMetrics(metricCount int, labelCount int, seriesCount int, metricLength i
 			metricsMux.Lock()
 			cycleValues(labelKeys, labelValues, seriesCount, seriesCycle)
 			metricsMux.Unlock()
-			select {
-			case updateNotify <- struct{}{}:
-			default:
-			}
+			sendToChannels(updateNotify)
 		}
 	}()
 
@@ -109,10 +110,7 @@ func RunMetrics(metricCount int, labelCount int, seriesCount int, metricLength i
 			seriesCycle++
 			cycleValues(labelKeys, labelValues, seriesCount, seriesCycle)
 			metricsMux.Unlock()
-			select {
-			case updateNotify <- struct{}{}:
-			default:
-			}
+			sendToChannels(updateNotify)
 		}
 	}()
 
@@ -125,10 +123,7 @@ func RunMetrics(metricCount int, labelCount int, seriesCount int, metricLength i
 			registerMetrics(metricCount, metricLength, metricCycle, labelKeys)
 			cycleValues(labelKeys, labelValues, seriesCount, seriesCycle)
 			metricsMux.Unlock()
-			select {
-			case updateNotify <- struct{}{}:
-			default:
-			}
+			sendToChannels(updateNotify)
 		}
 	}()
 
@@ -140,6 +135,12 @@ func RunMetrics(metricCount int, labelCount int, seriesCount int, metricLength i
 	}()
 
 	return updateNotify, nil
+}
+
+func sendToChannels(channels []chan struct{}) {
+	for _, c := range channels {
+		c <- struct{}{}
+	}
 }
 
 // ServeMetrics serves a prometheus metrics endpoint with test series

@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"math/rand"
 	"net/http"
 	"net/url"
 	"sort"
@@ -26,16 +27,20 @@ import (
 
 const maxErrMsgLen = 256
 
-var userAgent = "avalanche"
+var (
+	userAgent     = "avalanche"
+	valRandomizer = rand.New(rand.NewSource(time.Now().UnixNano()))
+)
 
 // ConfigWrite for the remote write requests.
 type ConfigWrite struct {
 	URL             url.URL
 	RequestInterval time.Duration
+	WritersBase,
 	WritersCount,
 	BatchSize,
 	RequestCount int
-	UpdateNotify chan struct{}
+	UpdateNotify []chan struct{}
 	PprofURLs    []*url.URL
 	Tenant       string
 	AccessToken  string
@@ -82,7 +87,7 @@ func SendRemoteWrite(config ConfigWrite) error {
 		config:  config,
 	}
 	if config.WritersCount == 1 {
-		return c.write(0)
+		return c.write(config.WritersBase, 0)
 	}
 
 	var wg sync.WaitGroup
@@ -90,7 +95,7 @@ func SendRemoteWrite(config ConfigWrite) error {
 	for w := 0; w < config.WritersCount; w++ {
 		lw := w
 		go func() {
-			c.write(lw)
+			c.write(config.WritersBase, lw)
 			wg.Done()
 		}()
 	}
@@ -136,9 +141,9 @@ func cloneRequest(r *http.Request) *http.Request {
 	return r2
 }
 
-func (c *Client) write(writer int) error {
+func (c *Client) write(baseWriter int, writer int) error {
 
-	tss, err := collectMetrics(writer)
+	tss, err := collectMetrics(baseWriter + writer)
 	if err != nil {
 		return err
 	}
@@ -153,7 +158,7 @@ func (c *Client) write(writer int) error {
 		merr            = &errors.MultiError{}
 	)
 
-	log.Printf("Sending:  %v timeseries, %v samples, %v timeseries per request, %v delay between requests\n", len(tss), c.config.RequestCount, c.config.BatchSize, c.config.RequestInterval)
+	log.Printf("Writer[%03d] sending:  %v timeseries, %v samples, %v timeseries per request, %v delay between requests\n", (baseWriter + writer), len(tss), c.config.RequestCount, c.config.BatchSize, c.config.RequestInterval)
 	ticker := time.NewTicker(c.config.RequestInterval)
 	defer ticker.Stop()
 	for ii := 0; ii < c.config.RequestCount; ii++ {
@@ -168,9 +173,11 @@ func (c *Client) write(writer int) error {
 		}
 		<-ticker.C
 		select {
-		case <-c.config.UpdateNotify:
-			log.Println("updating remote write metrics")
-			tss, err = collectMetrics(writer)
+		case <-c.config.UpdateNotify[writer]:
+			if writer == 0 || writer == 1 {
+				log.Println("updating remote write metrics")
+			}
+			tss, err = collectMetrics(baseWriter + writer)
 			if err != nil {
 				merr.Add(err)
 			}
@@ -204,7 +211,9 @@ func (c *Client) write(writer int) error {
 		wgMetrics.Wait()
 		totalTime += time.Since(start)
 		if merr.Count() > 20 {
+			log.Printf("Too many errors (%d), exiting from writer: %d\n", merr.Count(), writer)
 			merr.Add(fmt.Errorf("too many errors"))
+			log.Println(merr.Error())
 			return merr.Err()
 		}
 	}
@@ -231,20 +240,21 @@ func collectMetrics(writer int) ([]prompb.TimeSeries, error) {
 	if err != nil {
 		return nil, err
 	}
-	return ToTimeSeriesSlice(metricFamilies, writer), nil
+	return ToTimeSeriesSlice(writer, metricFamilies), nil
 }
 
 // ToTimeSeriesSlice converts a slice of metricFamilies containing samples into a slice of TimeSeries
-func ToTimeSeriesSlice(metricFamilies []*dto.MetricFamily, writer int) []prompb.TimeSeries {
+func ToTimeSeriesSlice(writer int, metricFamilies []*dto.MetricFamily) []prompb.TimeSeries {
 	tss := make([]prompb.TimeSeries, 0, len(metricFamilies)*10)
 	timestamp := int64(model.Now()) // Not using metric.TimestampMs because it is (always?) nil. Is this right?
 
 	for _, metricFamily := range metricFamilies {
 		for _, metric := range metricFamily.Metric {
-			labels := prompbLabels(*metricFamily.Name, metric.Label, writer)
+			labels := prompbLabels(writer, *metricFamily.Name, metric.Label)
 			ts := prompb.TimeSeries{
 				Labels: labels,
 			}
+			// Add a random component
 			switch *metricFamily.Type {
 			case dto.MetricType_COUNTER:
 				ts.Samples = []prompb.Sample{{
@@ -253,7 +263,7 @@ func ToTimeSeriesSlice(metricFamilies []*dto.MetricFamily, writer int) []prompb.
 				}}
 			case dto.MetricType_GAUGE:
 				ts.Samples = []prompb.Sample{{
-					Value:     *metric.Gauge.Value,
+					Value:     randomizeValue(writer, 100, *metric.Gauge.Value),
 					Timestamp: timestamp,
 				}}
 			}
@@ -264,7 +274,7 @@ func ToTimeSeriesSlice(metricFamilies []*dto.MetricFamily, writer int) []prompb.
 	return tss
 }
 
-func prompbLabels(name string, label []*dto.LabelPair, writer int) []prompb.Label {
+func prompbLabels(writer int, name string, label []*dto.LabelPair) []prompb.Label {
 	ret := make([]prompb.Label, 0, len(label)+1)
 	ret = append(ret, prompb.Label{
 		Name:  model.MetricNameLabel,
@@ -335,4 +345,26 @@ func (c *Client) Store(ctx context.Context, writer int, req *prompb.WriteRequest
 		return err
 	}
 	return err
+}
+
+func getRandomSign() int {
+	if valRandomizer.Intn(2) == 0 {
+		return 1
+	}
+	return -1
+}
+
+func randomizeValue(writer int, max int, curValue float64) float64 {
+	if writer == 0 {
+		return curValue
+	}
+	sign := getRandomSign()
+	newValue := (float64)(sign*valRandomizer.Intn(33)) + curValue
+	if newValue < 0.0 {
+		return 0.0
+	}
+	if newValue > 99.0 {
+		return 99.0
+	}
+	return newValue
 }
