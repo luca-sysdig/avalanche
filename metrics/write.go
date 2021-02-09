@@ -248,7 +248,7 @@ func ToTimeSeriesSlice(writer int, metricFamilies []*dto.MetricFamily) []prompb.
 	tss := make([]prompb.TimeSeries, 0, len(metricFamilies)*10)
 	timestamp := int64(model.Now()) // Not using metric.TimestampMs because it is (always?) nil. Is this right?
 
-	for _, metricFamily := range metricFamilies {
+	for familyIndex, metricFamily := range metricFamilies {
 		for _, metric := range metricFamily.Metric {
 			labels := prompbLabels(writer, *metricFamily.Name, metric.Label)
 			ts := prompb.TimeSeries{
@@ -263,7 +263,7 @@ func ToTimeSeriesSlice(writer int, metricFamilies []*dto.MetricFamily) []prompb.
 				}}
 			case dto.MetricType_GAUGE:
 				ts.Samples = []prompb.Sample{{
-					Value:     randomizeValue(writer, 100, *metric.Gauge.Value),
+					Value:     randomizeValue(writer, familyIndex, 100, *metric.Gauge.Value),
 					Timestamp: timestamp,
 				}}
 			}
@@ -281,16 +281,16 @@ func prompbLabels(writer int, name string, label []*dto.LabelPair) []prompb.Labe
 		Value: name,
 	})
 	ret = append(ret, prompb.Label{
-		Name:  "writer_index",
-		Value: fmt.Sprintf("writer_index_%03d", writer),
+		Name:  "avalanche_writer_index",
+		Value: fmt.Sprintf("writer_index_%06d", writer),
 	})
 	ret = append(ret, prompb.Label{
-		Name:  "writer_address",
-		Value: fmt.Sprintf("writer_address_%03d", writer),
+		Name:  "avalanche_writer_address",
+		Value: fmt.Sprintf("writer_address_%06d", writer),
 	})
 	ret = append(ret, prompb.Label{
-		Name:  "writer_geo",
-		Value: fmt.Sprintf("writer_geo_%03d", writer),
+		Name:  "avalanche_writer_geo",
+		Value: fmt.Sprintf("writer_geo_%06d", writer),
 	})
 	for _, pair := range label {
 		ret = append(ret, prompb.Label{
@@ -354,12 +354,12 @@ func getRandomSign() int {
 	return -1
 }
 
-func randomizeValue(writer int, max int, curValue float64) float64 {
-	if writer == 0 {
+func randomizeValue(writer int, familyIndex int, max int, curValue float64) float64 {
+	if writer == 0 || curValue <= 5 {
 		return curValue
 	}
 	sign := getRandomSign()
-	newValue := (float64)(sign*valRandomizer.Intn(33)) + curValue
+	newValue := (float64)(sign*valRandomizer.Intn(30)) + curValue
 	if newValue < 0.0 {
 		return 0.0
 	}

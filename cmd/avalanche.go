@@ -33,6 +33,7 @@ var (
 	remoteReqsInterval  = kingpin.Flag("remote-write-interval", "delay between each remote write request.").Default("100ms").Duration()
 	remoteTenant        = kingpin.Flag("remote-tenant", "Tenant ID to include in remote_write send").Default("0").String()
 	remoteAccessToken   = kingpin.Flag("remote-api-token", "API token to include in remote_write send").Default("").String()
+	inputMetricName     = kingpin.Flag("input-metric-name", "Metric name to add to the defaults").Default("").String()
 )
 
 func main() {
@@ -43,7 +44,7 @@ func main() {
 
 	stop := make(chan struct{})
 	defer close(stop)
-	updateNotify, err := metrics.RunMetrics(*remoteWritersCount, *metricCount, *labelCount, *seriesCount, *metricLength, *labelLength, *valueInterval, *labelInterval, *metricInterval, stop)
+	updateNotify, err := metrics.RunMetrics(*remoteWritersCount, *metricCount, *labelCount, *seriesCount, *metricLength, *labelLength, *valueInterval, *labelInterval, *metricInterval, *inputMetricName, stop)
 	if err != nil {
 		log.Fatal(err)
 	}
